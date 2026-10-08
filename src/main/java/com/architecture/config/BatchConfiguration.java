@@ -25,20 +25,28 @@ public class BatchConfiguration {
 
     @Bean
     public ItemReader<CreditRecord> customReader() {
+        final int TOTAL_RECORDS = 100000;
         final AtomicInteger counter = new AtomicInteger(0);
-        final Iterator<CreditRecord> iterator = Stream.generate(() -> {
-            int id = counter.getAndIncrement();
-            double debt = (id == 15000) ? -500.0 : (Math.random() * 400000);
-            return new CreditRecord("ACC-" + id, "Corporate Entity " + id, debt, 500000.0);
-        }).limit(100000).iterator();
 
-        return () -> iterator.hasNext() ? iterator.next() : null;
+        return () -> {
+            // Increment the atomic counter safely first
+            int id = counter.getAndIncrement();
+
+            // Immediately return null once the strict boundary limit is reached
+            if (id >= TOTAL_RECORDS) {
+                return null;
+            }
+
+            // Each worker thread generates its allocated record independently and concurrently without locks
+            double debt = (id == 15000) ? -500.0 : java.util.concurrent.ThreadLocalRandom.current().nextDouble(0, 400000);
+            return new CreditRecord("ACC-" + id, "Corporate Entity " + id, debt, 5000.0);
+        };
     }
 
     @Bean
     public ItemWriter<RiskEvaluation> customWriter() {
         return chunk -> {
-            System.out.printf("[AKS Batch Pod Execution] Committed chunk of %d records seamlessly to storage.%n", chunk.size());
+            IO.println("[AKS Batch Pod Execution] Committed chunk of %d records seamlessly to storage.".formatted(chunk.size()));
         };
     }
 
