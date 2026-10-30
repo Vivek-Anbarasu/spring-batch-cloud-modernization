@@ -1,0 +1,163 @@
+# Baseline configuration for Spring Batch Cloud Modernization
+# This file contains default values that can be overridden by environment-specific values files
+
+# Application image configuration
+image:
+  repository: spring-batch-cloud-modernization
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# CronJob schedule (runs daily at 2 AM UTC by default)
+schedule: "0 2 * * *"
+
+# Timezone for the cron schedule
+timezone: "UTC"
+
+# Kubernetes job configuration
+job:
+  # Restart policy for the job pod
+  restartPolicy: OnFailure
+  # Active deadline in seconds (6 hours)
+  activeDeadlineSeconds: 21600
+  # Backoff limit for retries
+  backoffLimit: 3
+  # TTL after finished (1 day)
+  ttlSecondsAfterFinished: 86400
+  # Concurrency policy
+  concurrencyPolicy: Forbid
+  # Starting deadline seconds
+  startingDeadlineSeconds: 300
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: "1000m"
+    memory: "1Gi"
+  requests:
+    cpu: "500m"
+    memory: "512Mi"
+
+# JVM configuration for batch processing. Rendered into JAVA_TOOL_OPTIONS, so the flags reach
+# the JVM regardless of the image entrypoint.
+jvm:
+  # GC settings optimized for short-lived batch jobs
+  options: "-XX:+UseParallelGC -XX:MinRAMPercentage=50.0 -XX:MaxRAMPercentage=80.0"
+
+# Spring Batch configuration
+springBatch:
+  # Job name to execute (from BatchConfiguration)
+  jobName: "cloudModernizationJob"
+  # Initialize schema on startup
+  initializeSchema: "always"
+
+# Database configuration (override in environment-specific values)
+datasource:
+  url: "jdbc:h2:mem:batchdb;DB_CLOSE_DELAY=-1"
+  driverClassName: "org.h2.Driver"
+  username: "sa"
+  password: ""
+  # Name of an existing Secret holding the `password` key. Left empty, the chart uses the
+  # Secret it creates from `password` above, or the one materialised by the CSI driver.
+  existingSecret: ""
+  hikari:
+    maximumPoolSize: 10
+    minimumIdle: 2
+    idleTimeout: 300000
+    connectionTimeout: 20000
+
+# Security context for pod
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+# Service account
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Secrets Store CSI Driver configuration
+secretsStore:
+  enabled: false
+  # Provider: "azure", "aws", "gcp", "vault"
+  provider: "azure"
+  # SecretProviderClass name
+  secretProviderClassName: "spring-batch-secrets"
+  # Secret objects to mount
+  secretObjects: []
+  # Volume mount path
+  mountPath: "/mnt/secrets-store"
+  # Read only mount
+  readOnly: true
+
+# Labels to add to all resources
+commonLabels:
+  app.kubernetes.io/managed-by: Helm
+
+# Annotations to add to all resources
+commonAnnotations: {}
+
+# Node selector for pod scheduling
+nodeSelector: {}
+
+# Tolerations for pod scheduling
+tolerations: []
+
+# Affinity for pod scheduling
+affinity: {}
+
+# Priority class name
+priorityClassName: ""
+
+# Pod disruption budget (if needed)
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# Prometheus monitoring
+monitoring:
+  enabled: false
+  port: 8080
+  path: "/actuator/prometheus"
+
+# Liveness and readiness probes (for sidecars if any)
+probes:
+  liveness:
+    enabled: false
+    initialDelaySeconds: 60
+    periodSeconds: 30
+  readiness:
+    enabled: false
+    initialDelaySeconds: 30
+    periodSeconds: 10
+
+# Additional environment variables
+extraEnv: []
+
+# Additional environment variables from secrets/configmaps
+extraEnvFrom: []
+
+# Volumes and volume mounts
+volumes: []
+volumeMounts: []
+
+# Init containers
+initContainers: []
+
+# Sidecar containers
+sidecarContainers: []

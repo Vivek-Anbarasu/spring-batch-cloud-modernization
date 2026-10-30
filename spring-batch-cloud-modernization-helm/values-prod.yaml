@@ -1,0 +1,184 @@
+# Production Environment Overrides
+# This file contains production-specific configurations with strict resource bounds
+
+# Image tag for production (semantic version from release)
+image:
+  tag: "1.0.0"
+  pullPolicy: Always
+
+# Production Cron schedule - runs daily at 1 AM UTC (low traffic window)
+schedule: "0 1 * * *"
+
+# Production Resource configuration - Fenced 2Gi memory bounds as specified
+resources:
+  limits:
+    cpu: "2000m"
+    memory: "2Gi"
+  requests:
+    cpu: "1000m"
+    memory: "1Gi"
+
+# Production Database configuration - dedicated PostgreSQL instance
+datasource:
+  url: "jdbc:postgresql://postgresql-prod.database.svc.cluster.local:5432/batchdb_prod"
+  driverClassName: "org.postgresql.Driver"
+  username: "batch_user_prod"
+  password: "" # Injected from Key Vault via the CSI driver, never committed
+  existingSecret: "spring-batch-datasource-prod"
+  hikari:
+    maximumPoolSize: 20
+    minimumIdle: 10
+    idleTimeout: 600000
+    connectionTimeout: 30000
+
+# Production schema ownership: the batch metadata tables are created by the release migration,
+# not by every pod at startup. Running `initialize-schema=always` against a shared database
+# means concurrent pods race on DDL they may not even be permitted to execute.
+springBatch:
+  initializeSchema: "never"
+
+# Production Secrets Store CSI Driver - enabled for production
+secretsStore:
+  enabled: true
+  provider: "azure"
+  secretProviderClassName: "spring-batch-secrets-prod"
+  secretObjects:
+    - secretName: spring-batch-datasource-prod
+      type: Opaque
+      data:
+        - objectName: db-username
+          key: username
+        - objectName: db-password
+          key: password
+    - secretName: spring-batch-app-secrets-prod
+      type: Opaque
+      data:
+        - objectName: app-encryption-key
+          key: encryption-key
+  mountPath: "/mnt/secrets-store"
+  readOnly: true
+
+# Production JVM options - optimized for production batch workloads
+jvm:
+  options: "-XX:+UseParallelGC -XX:MinRAMPercentage=50.0 -XX:MaxRAMPercentage=80.0 -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/heapdump.hprof -Dspring.profiles.active=prod"
+
+# Production specific labels
+commonLabels:
+  app.kubernetes.io/managed-by: Helm
+  environment: prod
+  compliance: "pci-dss"
+
+# Production specific annotations
+commonAnnotations:
+  "checksum/config": "{{ .Release.Revision }}"
+  "backup.schedule": "daily"
+  "cost-center": "batch-processing"
+
+# Production Node selector - target production node pool with specific instance types
+nodeSelector:
+  nodepool: prod-worker
+  instance-type: "memory-optimized"
+
+# Production Tolerations - dedicated production nodes
+tolerations:
+  - key: "environment"
+    operator: "Equal"
+    value: "prod"
+    effect: "NoSchedule"
+  - key: "workload-type"
+    operator: "Equal"
+    value: "batch"
+    effect: "NoSchedule"
+
+# Production Affinity - spread across availability zones
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - spring-batch-cloud-modernization
+          topologyKey: topology.kubernetes.io/zone
+
+# Production Monitoring - disabled: this image has no actuator dependency, so there is no
+# /actuator/prometheus to scrape, and a pod that lives for milliseconds is not a scrape target.
+# Enable it together with spring-boot-starter-actuator if that changes.
+monitoring:
+  enabled: false
+  port: 8080
+  path: "/actuator/prometheus"
+
+# Production Priority class - high priority for business-critical batch
+priorityClassName: "batch-prod-critical"
+
+# Production job configuration - longer deadline for full dataset (8 hours)
+job:
+  activeDeadlineSeconds: 28800
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 604800 # 7 days retention for audit
+
+# Production Security - enhanced
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  seccompProfile:
+    type: RuntimeDefault
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+# Production Service Account with minimal RBAC
+serviceAccount:
+  create: true
+  name: spring-batch-prod-sa
+  annotations:
+    "azure.workload.identity/client-id": "${AZURE_CLIENT_ID}"
+
+# Production Extra environment variables
+extraEnv:
+  - name: SPRING_PROFILES_ACTIVE
+    value: "prod"
+  - name: LOGGING_LEVEL_ROOT
+    value: "INFO"
+  - name: LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_BATCH
+    value: "WARN"
+  - name: MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE
+    value: "health,info,metrics,prometheus"
+  - name: MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS
+    value: "when_authorized"
+
+# Production volumes for heap dumps and logs
+volumes:
+  - name: heap-dump
+    emptyDir:
+      sizeLimit: 500Mi
+  - name: tmp-logs
+    emptyDir:
+      sizeLimit: 100Mi
+
+volumeMounts:
+  - name: heap-dump
+    mountPath: /tmp
+  - name: tmp-logs
+    mountPath: /var/log/batch
+
+# Pod Disruption Budget for production HA
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

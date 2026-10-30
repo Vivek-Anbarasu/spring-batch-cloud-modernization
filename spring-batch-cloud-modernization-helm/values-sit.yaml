@@ -1,0 +1,94 @@
+# SIT (System Integration Testing) Environment Overrides
+# This file contains SIT-specific configurations
+
+# Image tag for SIT (typically built from develop/main branch)
+image:
+  tag: "sit-latest"
+
+# SIT Cron schedule - runs every 6 hours for integration testing
+schedule: "0 */6 * * *"
+
+# SIT Resource configuration - moderate resources for integration testing
+resources:
+  limits:
+    cpu: "1500m"
+    memory: "1536Mi"
+  requests:
+    cpu: "750m"
+    memory: "768Mi"
+
+# SIT Database configuration - typically a shared PostgreSQL instance
+datasource:
+  url: "jdbc:postgresql://postgresql-sit.database.svc.cluster.local:5432/batchdb_sit"
+  driverClassName: "org.postgresql.Driver"
+  username: "batch_user_sit"
+  password: "" # Injected from Key Vault via the CSI driver, never committed
+  existingSecret: "spring-batch-datasource-sit"
+  hikari:
+    maximumPoolSize: 15
+    minimumIdle: 5
+    idleTimeout: 300000
+    connectionTimeout: 30000
+
+# SIT Secrets Store CSI Driver - enabled for SIT
+secretsStore:
+  enabled: true
+  provider: "azure"
+  secretProviderClassName: "spring-batch-secrets-sit"
+  secretObjects:
+    - secretName: spring-batch-datasource-sit
+      type: Opaque
+      data:
+        - objectName: db-username
+          key: username
+        - objectName: db-password
+          key: password
+  mountPath: "/mnt/secrets-store"
+  readOnly: true
+
+# SIT specific JVM options
+jvm:
+  options: "-XX:+UseParallelGC -XX:MinRAMPercentage=50.0 -XX:MaxRAMPercentage=80.0 -Dspring.profiles.active=sit"
+
+# SIT specific labels
+commonLabels:
+  app.kubernetes.io/managed-by: Helm
+  environment: sit
+
+# SIT specific annotations
+commonAnnotations:
+  "checksum/config": "{{ .Release.Revision }}"
+
+# SIT Node selector - target SIT node pool
+nodeSelector:
+  nodepool: sit-worker
+
+# SIT Tolerations
+tolerations:
+  - key: "environment"
+    operator: "Equal"
+    value: "sit"
+    effect: "NoSchedule"
+
+# SIT Monitoring - disabled: no actuator dependency in this image, so nothing serves
+# /actuator/prometheus. See the note in values-prod.yaml.
+monitoring:
+  enabled: false
+  port: 8080
+  path: "/actuator/prometheus"
+
+# SIT Priority class
+priorityClassName: "batch-sit-priority"
+
+# SIT Active deadline - shorter for testing (2 hours)
+job:
+  activeDeadlineSeconds: 7200
+
+# SIT Extra environment variables
+extraEnv:
+  - name: SPRING_PROFILES_ACTIVE
+    value: "sit"
+  - name: LOGGING_LEVEL_ROOT
+    value: "DEBUG"
+  - name: LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_BATCH
+    value: "DEBUG"

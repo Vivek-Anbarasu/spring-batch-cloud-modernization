@@ -1,0 +1,149 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "spring-batch-cloud-modernization.fullname" . }}
+  labels:
+    {{- include "spring-batch-cloud-modernization.labels" . | nindent 4 }}
+  annotations:
+    {{- include "spring-batch-cloud-modernization.annotations" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.schedule | quote }}
+  timezone: {{ .Values.timezone | quote }}
+  concurrencyPolicy: {{ .Values.job.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ .Values.job.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  suspend: false
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.job.activeDeadlineSeconds }}
+      backoffLimit: {{ .Values.job.backoffLimit }}
+      ttlSecondsAfterFinished: {{ .Values.job.ttlSecondsAfterFinished }}
+      template:
+        metadata:
+          labels:
+            {{- include "spring-batch-cloud-modernization.labels" . | nindent 12 }}
+            {{- with .Values.commonLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            {{- include "spring-batch-cloud-modernization.annotations" . | nindent 12 }}
+            {{- with .Values.commonAnnotations }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if .Values.monitoring.enabled }}
+            prometheus.io/scrape: "true"
+            prometheus.io/port: "{{ .Values.monitoring.port }}"
+            prometheus.io/path: "{{ .Values.monitoring.path }}"
+            {{- end }}
+        spec:
+          {{- with .Values.image.pullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          serviceAccountName: {{ include "spring-batch-cloud-modernization.serviceAccountName" . }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          {{- if .Values.initContainers }}
+          initContainers:
+            {{- toYaml .Values.initContainers | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: {{ .Chart.Name }}
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              # JVM flags are supplied through JAVA_TOOL_OPTIONS rather than `args`. The image
+              # entrypoint is `java org.springframework.boot.loader.launch.JarLauncher`, so
+              # anything in `args` lands *after* the main class and is read as a program
+              # argument - which silently ignores -Xmx and friends.
+              env:
+                - name: JAVA_TOOL_OPTIONS
+                  value: {{ .Values.jvm.options | quote }}
+                - name: SPRING_BATCH_JOB_NAME
+                  value: {{ .Values.springBatch.jobName | quote }}
+                - name: SPRING_DATASOURCE_URL
+                  value: {{ .Values.datasource.url | quote }}
+                - name: SPRING_DATASOURCE_DRIVER_CLASS_NAME
+                  value: {{ .Values.datasource.driverClassName | quote }}
+                - name: SPRING_DATASOURCE_USERNAME
+                  value: {{ .Values.datasource.username | quote }}
+                - name: SPRING_DATASOURCE_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ default (include "spring-batch-cloud-modernization.datasourceSecretName" .) .Values.datasource.existingSecret }}
+                      key: password
+                      optional: true
+                - name: SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE
+                  value: "{{ .Values.datasource.hikari.maximumPoolSize }}"
+                - name: SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE
+                  value: "{{ .Values.datasource.hikari.minimumIdle }}"
+                - name: SPRING_DATASOURCE_HIKARI_IDLE_TIMEOUT
+                  value: "{{ .Values.datasource.hikari.idleTimeout }}"
+                - name: SPRING_DATASOURCE_HIKARI_CONNECTION_TIMEOUT
+                  value: "{{ .Values.datasource.hikari.connectionTimeout }}"
+                - name: SPRING_BATCH_JDBC_INITIALIZE_SCHEMA
+                  value: {{ .Values.springBatch.initializeSchema | quote }}
+                {{- range .Values.extraEnv }}
+                - name: {{ .name }}
+                  value: {{ .value | quote }}
+                {{- end }}
+              {{- with .Values.extraEnvFrom }}
+              envFrom:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              resources:
+                {{- toYaml .Values.resources | nindent 14 }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 14 }}
+              {{- if or .Values.secretsStore.enabled .Values.volumeMounts }}
+              volumeMounts:
+                {{- if .Values.secretsStore.enabled }}
+                - name: secrets-store
+                  mountPath: {{ .Values.secretsStore.mountPath }}
+                  readOnly: {{ .Values.secretsStore.readOnly }}
+                {{- end }}
+                {{- range .Values.volumeMounts }}
+                - name: {{ .name }}
+                  mountPath: {{ .mountPath }}
+                  {{- if .subPath }}
+                  subPath: {{ .subPath }}
+                  {{- end }}
+                  {{- if .readOnly }}
+                  readOnly: {{ .readOnly }}
+                  {{- end }}
+                {{- end }}
+              {{- end }}
+          {{- if .Values.sidecarContainers }}
+          {{- toYaml .Values.sidecarContainers | nindent 12 }}
+          {{- end }}
+          {{- if or .Values.secretsStore.enabled .Values.volumes }}
+          volumes:
+            {{- if .Values.secretsStore.enabled }}
+            - name: secrets-store
+              csi:
+                driver: secrets-store.csi.k8s.io
+                readOnly: true
+                volumeAttributes:
+                  secretProviderClass: {{ .Values.secretsStore.secretProviderClassName }}
+            {{- end }}
+            {{- range .Values.volumes }}
+            - name: {{ .name }}
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+          {{- end }}
+          restartPolicy: {{ .Values.job.restartPolicy }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.priorityClassName }}
+          priorityClassName: {{ . }}
+          {{- end }}
