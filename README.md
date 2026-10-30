@@ -1,111 +1,165 @@
-# Spring Batch Cloud Modernization Pipeline
+# Spring Batch Cloud Modernization
 
-[![Java Version](https://img.shields.io/badge/Java-27-orange.svg)](https://jdk.java.net/27/)
+[![CI](https://github.com/Vivek-Anbarasu/spring-batch-cloud-modernization/actions/workflows/ci.yml/badge.svg)](https://github.com/Vivek-Anbarasu/spring-batch-cloud-modernization/actions/workflows/ci.yml)
+[![Java](https://img.shields.io/badge/Java-27-orange.svg)](https://jdk.java.net/27/)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-brightgreen.svg)](https://spring.io/projects/spring-boot)
-[![Infrastructure](https://img.shields.io/badge/Target%20Env-Kubernetes%20%2F%20AKS-blue.svg)](https://azure.microsoft.com/en-us/products/kubernetes-service)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A production-grade, memory-optimized financial data processing engine engineered with **Spring Boot 4.1.1** and **Java 27**. This repository serves as an architectural blueprint for migrating legacy monolith scheduled processes (e.g., Struts / Sybase / Autosys) into modern, containerized, cloud-native transient jobs running on **Azure Kubernetes Service (AKS)**.
+A reference implementation of the migration path most large enterprises still have ahead of them:
+a legacy scheduled extract (Struts / Sybase / Autosys) turned into a **transient, self-terminating
+Kubernetes job** that processes a bounded dataset, reports what it did, and exits.
 
----
+The domain is deliberately boring — 100,000 corporate credit accounts scored into risk tiers — so
+the interesting parts are visible: chunking, fault tolerance, restart semantics, and what the pod
+looks like once it is a `CronJob` instead of a daemon.
 
-## 🏗️ Architectural Blueprints
-
-The pipeline models a high-throughput financial batch system designed to process **100,000 corporate credit accounts** via memory-optimized transaction chunks, implementing structural fault tolerance.
+## What it does
 
 ```
- [ 100,000 Inbound Records ] ──► [ Custom Streaming Reader ]
-                                           │
-                                           ▼ (Chunk-Size: 5,000)
-                                 [ Fault-Tolerant Step ]
-                                           │
-          ┌────────────────────────────────┴────────────────────────────────┐
-          ▼ (Process)                                                       ▼ (Fault Handling)
- [ CreditRiskProcessor ]                                           [ Skip & Retry Gating ]
-  - Java 27 Pattern Match                                           - Captures Data Anomalies
-  - Dynamic Risk Tiering                                            - Max Skip Limit: 10
-          │
-          ▼ (Write)
- [ High-Throughput Writer ] ──► [ Ephemeral Storage Commit ] ──► [ Clean Container Exit ]
+  100,000 synthetic accounts
+            │
+            ▼
+  ItemStreamReader ── generates on demand, never loads the dataset
+            │
+            ▼  chunk of 5,000
+  CreditRiskProcessor ── ratio → HIGH / MEDIUM / LOW
+            │              throws IllegalArgumentException on a negative balance
+            ▼
+  fault-tolerant step ── skip(IllegalArgumentException), limit 10
+            │
+            ▼
+  ItemWriter ── one log line per committed chunk
+            │
+            ▼
+  reconciliation line ── read=100000 written=99999 skipped=1
+            │
+            ▼
+  SpringApplication.exit(context) ── pod exits with the job's status
 ```
 
-### Key Architectural Design Patterns
-1. **Chunk-Oriented Processing:** Configured with an optimized chunk boundary allocation of **5,000 records per transaction block**. This balances JVM memory utilization with thread-lock overhead, matching specific cloud resource optimization patterns.
-2. **Fault-Tolerant Resilience:** Implements an explicit `.faultTolerant().skip(IllegalArgumentException.class).skipLimit(10)` boundary. This isolates dirty upstream data anomalies (such as negative balances) seamlessly without blowing up the core container runtimes mid-job.
-3. **Java 27 Type Guard Rails:** Replaces archaic nested loops and legacy if-else conditional branches inside the business layer with modern Java 27 **Pattern Matching for Switch Expressions**, making complex data evaluation highly performant and readable.
-4. **Transient Cloud Lifecycle:** Built around a self-terminating runtime loop (`System.exit(SpringApplication.exit(context))`). This ensures that the application spins up, processes data chunks, and cleanly shuts down, completely eliminating idle container hosting costs on **AKS / Kubernetes clusters**.
+## Design decisions
 
----
+**Chunk size of 5,000, not 500 or 50,000.** The chunk is the unit of transaction and of restart.
+Smaller chunks mean more commits and more round trips to the job repository; larger chunks mean a
+longer rollback window and a bigger in-memory working set. 5,000 gives 20 commits for this dataset
+— a number the integration test asserts, so a change to the chunk size cannot pass unnoticed.
 
-## ⚙️ Prerequisites & Environment Baseline
+**The skip policy names one exception type.** `.skip(IllegalArgumentException.class)` covers bad
+data (a negative balance). It deliberately does not cover `Exception`: a skip policy that catches
+everything turns a database outage into a `COMPLETED` job that quietly lost 40,000 rows. The skip
+limit of 10 is the second half of that guard — beyond ten bad rows the job fails, because at that
+point the input is broken rather than dirty.
 
-* **Java Development Kit (JDK) 27** or higher.
-* **Apache Maven 3.6.3** or higher.
+**The reader is an `ItemStreamReader`, not a lambda.** A lambda's counter survives between
+executions, so a restart inside the same JVM would resume from an exhausted counter and report a
+successful run that read zero records. Resetting in `open()` is what makes the reader restartable,
+and `BatchJobIntegrationTest.resetsTheReaderBetweenExecutions` fails if that reset is removed.
 
----
+**The job reports its own reconciliation.** Skips are silent by default, and a silently skipped row
+is a lost row. The job listener logs `read / written / skipped` at the end of every run, which is
+the line an operator actually looks for:
 
-## 🚀 Step-by-Step Getting Started
-
-### 1. Clone the Modernized Repository
-```bash
-git clone https://github.com/Vivek-Anbarasu/spring-batch-cloud-modernization.git
-cd spring-batch-cloud-modernization
+```
+Step migrationStep finished COMPLETED: read=100000, written=99999, skipped=1
 ```
 
-### 2. Package the Application Artifact
-Compile the codebase and bundle it into a runnable package. The system utilizes global properties to guarantee platform-independent builds across Linux/macOS environments and Windows architectures:
+**Java 27 is the target, not a requirement.** The build pins `<maven.compiler.release>27</maven.compiler.release>`
+to match the runtime image. The code itself uses nothing newer than pattern matching for switch with
+guards, which was finalised in Java 21 — so the release level can be lowered without touching the
+source. Saying so is more useful than implying the pipeline depends on a language feature it doesn't.
+
+## Measured
+
+One run on a laptop, with the synthetic in-memory reader and H2:
+
+```
+Step migrationStep finished COMPLETED: read=100000, written=99999, skipped=1
+Job: [SimpleJob: [name=cloudModernizationJob]] completed with the following status: [COMPLETED] in 187ms
+```
+
+This is a correctness measurement, not a throughput benchmark: the reader generates records instead
+of reading them and the writer logs instead of writing, so the number says nothing about a real
+extract. What it does show is 20 chunk commits, one skip, and a clean exit.
+
+## Build and run
+
+Requires JDK 27 and Maven 3.6.3+.
+
 ```bash
 mvn clean package
+java -jar target/spring-batch-cloud-modernization-1.0.0.jar
 ```
 
-### 3. Execute the Cloud Native Batch
-Launch the self-terminating processing loop locally:
+`spring.batch.job.enabled=true` in `application.properties` means the job runs on startup and the
+application exits when it finishes. To select a job explicitly, or to pass parameters from a
+scheduler:
+
 ```bash
-mvn spring-boot:run
+java -jar target/spring-batch-cloud-modernization-1.0.0.jar \
+  --spring.batch.job.name=cloudModernizationJob \
+  --runDate=2026-10-08
 ```
 
----
+Note the `--` on the parameter: `runDate=...` without it is an application argument, not a job
+parameter, and will not identify the job instance.
 
-## 📋 Technical Implementation Insights
+## Tests
 
-### Modern Java 27 Pattern-Matching Processor
-The execution layer harnesses advanced compiler evaluation features to map account ratios safely to risk profiles without side-effects:
-```java
-    String tier = switch (Double.valueOf(ratio)) {
-    case Double r when r >= 0.7 -> "HIGH_RISK";
-    case Double r when r >= 0.4 -> "MEDIUM_RISK";
-    case Double r when r >= 0.0 -> "LOW_RISK";
-    default -> "UNCLASSIFIED_TIER";
-};
+```bash
+mvn test     # 17 tests
 ```
 
-### Configuration Performance Matrix
-Under `src/main/resources/application.properties`, the embedded metadata catalog boundaries are localized for light memory orchestration footprints:
-* `spring.batch.job.enabled=true` (Triggers job automation instantly upon cluster initialization pods). 
-* `spring.batch.job.enabled=false` - Production it should be false and to be scheduled with cron timing and triggered from Autosys or Airflow  or Kubernetes CronJobs.
-* `spring.batch.jdbc.initialize-schema=always` (Configures in-memory tracking structures instantly without pre-existing schemas).
+| Test | What it pins down |
+| --- | --- |
+| `CreditRecordTest` (4) | ratio arithmetic, and the zero/negative-asset guard that would otherwise be a division by zero |
+| `CreditRiskProcessorTest` (10) | every tier boundary from both sides (0.70 is HIGH, 0.6999 is MEDIUM), status derivation, and that a negative balance throws the exact type the step skips |
+| `BatchJobIntegrationTest` (3) | the real job against a real H2 job repository: 100,000 read, 99,999 written, 1 skipped in the processor, 0 rollbacks, 20 commits; a second execution still reads the full dataset; a completed job instance cannot be run twice |
 
----
+The integration test is not mocked. The behaviour worth testing — chunking, skip handling and the
+job repository — only exists when the launcher, the step and the repository are all real.
 
-##  Sample Autosys trigger command
+## Deploying to Kubernetes
 
-java -jar spring-batch-cloud-modernization.jar --spring.batch.job.name=creditMigrationJob runDate=2026-10-08
+The `spring-batch-cloud-modernization-helm/` chart deploys the job as a `CronJob`.
 
-## 📊 Sample Pod Output Log
-
-Upon execution, the processing console logs out step chunks transparently before executing self-termination:
-
-```text
-  .   ____          _            __ _ _
- /\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
-( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
- \\/  ___)| |_)| | | | | || (_| |  \ \ \ \
-  '  |____| .__|_| |_|_| |_\__, | / / / /
- =========|_|==============|___/=/_/_/_/
- :: Spring Boot ::                (v4.1.1)
-
-[AKS Batch Pod Execution] Committed chunk of 5000 records seamlessly to storage.
-[AKS Batch Pod Execution] Committed chunk of 5000 records seamlessly to storage.
-...
-[AKS Batch Pod Execution] Committed chunk of 5000 records seamlessly to storage.
-Job: [SimpleJob: name=cloudModernizationJob] completed with the following status: [COMPLETED] in 1s 435ms
+```bash
+helm lint spring-batch-cloud-modernization-helm
+helm template my-release spring-batch-cloud-modernization-helm -f spring-batch-cloud-modernization-helm/values-prod.yaml
+helm upgrade --install my-release spring-batch-cloud-modernization-helm \
+  -f spring-batch-cloud-modernization-helm/values-prod.yaml \
+  --namespace batch --create-namespace
 ```
+
+Three things in the chart are worth calling out, because each is a common way these deployments
+break:
+
+- **JVM flags go through `JAVA_TOOL_OPTIONS`, not `args`.** The image entrypoint is
+  `java org.springframework.boot.loader.launch.JarLauncher`. Anything passed in `args` lands after
+  the main class and is read as a program argument, so `-Xmx` is silently ignored.
+- **`initialize-schema` is `never` in production.** Creating the batch metadata tables from every
+  pod means concurrent pods racing on DDL against a shared database — and usually a pod that has no
+  permission to run it. The tables are owned by the release migration.
+- **The database password is not in the chart.** Production and SIT mount a Key Vault secret through
+  the Secrets Store CSI driver and reference the materialised Secret by name
+  (`datasource.existingSecret`). The local default is a throwaway H2 instance.
+
+CI lints and renders the chart for the default, SIT and production values, because a chart that
+lints is not the same as a chart that renders.
+
+## Known limitations
+
+Stated plainly, because a reference implementation that pretends to be finished is worse than one
+that is honest about its edges:
+
+- The reader is synthetic and the writer logs. Replacing them with a real extract and a
+  `JdbcBatchItemWriter` is the work this repository is a template for, not work it has done.
+- The step is single-threaded. Partitioning or a multi-threaded step would change the throughput
+  story and the job repository load, and neither is demonstrated here.
+- No container image is built in CI. The chart expects `image.repository`/`image.tag` to point at
+  an image you have built.
+- No actuator dependency, so there is no `/actuator/prometheus`; the monitoring annotations are
+  therefore disabled in every environment.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
