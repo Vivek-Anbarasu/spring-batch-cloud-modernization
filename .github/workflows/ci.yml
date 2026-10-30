@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test (JDK 27)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 27
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "27"
+          cache: maven
+
+      # The integration test starts the real job against an in-memory H2 repository, so this
+      # needs no database service and no external infrastructure.
+      - name: Build and test
+        run: mvn -B -ntp verify
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: surefire-reports
+          path: "**/target/surefire-reports/**"
+          if-no-files-found: ignore
+          retention-days: 7
+
+  helm:
+    name: Lint and render the chart
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up Helm
+        uses: Azure/setup-helm@v5
+        with:
+          version: v4.3.1
+
+      - name: Lint every values file
+        run: |
+          helm lint spring-batch-cloud-modernization-helm
+          helm lint spring-batch-cloud-modernization-helm -f spring-batch-cloud-modernization-helm/values-sit.yaml
+          helm lint spring-batch-cloud-modernization-helm -f spring-batch-cloud-modernization-helm/values-prod.yaml
+
+      # Rendering catches the failures lint does not: a values key the template never reads, or
+      # a required value that is empty in one environment only.
+      - name: Render every values file
+        run: |
+          helm template ci spring-batch-cloud-modernization-helm > /dev/null
+          helm template ci spring-batch-cloud-modernization-helm -f spring-batch-cloud-modernization-helm/values-sit.yaml > /dev/null
+          helm template ci spring-batch-cloud-modernization-helm -f spring-batch-cloud-modernization-helm/values-prod.yaml > /dev/null

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" 
+<project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
@@ -13,8 +13,10 @@
 
     <groupId>com.architecture</groupId>
     <artifactId>spring-batch-cloud-modernization</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <version>1.0.0</version>
     <name>spring-batch-cloud-modernization</name>
+    <description>Chunk-oriented Spring Batch job for migrating a legacy scheduled extract to a
+        transient Kubernetes CronJob</description>
 
     <properties>
         <maven.compiler.release>27</maven.compiler.release>
@@ -22,13 +24,20 @@
     </properties>
 
     <dependencies>
+        <!-- Batch, plus spring-boot-starter-jdbc for the DataSource the job repository needs.
+             There is no JPA starter: nothing in this project maps an entity, and pulling in
+             Hibernate for a job whose only write target is the batch metadata tables would add
+             startup cost and log noise for no benefit. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-batch</artifactId>
         </dependency>
+        <!-- spring-boot-starter-batch 4.x brings spring-jdbc but not the JDBC starter, so the
+             DataSource and PlatformTransactionManager the job repository needs have to be
+             declared explicitly. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-jpa</artifactId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
         </dependency>
         <dependency>
             <groupId>com.h2database</groupId>
@@ -39,6 +48,19 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
+            <exclusions>
+                <!-- Nothing here mocks anything: the integration test runs the real job against
+                     a real H2 repository. Dropping Mockito also silences its self-attach warning
+                     on JDK 27. -->
+                <exclusion>
+                    <groupId>org.mockito</groupId>
+                    <artifactId>mockito-core</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.mockito</groupId>
+                    <artifactId>mockito-junit-jupiter</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
     </dependencies>
 
